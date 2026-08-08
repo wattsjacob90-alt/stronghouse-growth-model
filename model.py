@@ -165,14 +165,29 @@ def _company_progress(path_df: pd.DataFrame) -> dict[pd.Timestamp, float]:
     }
 
 
-def club_schedule(path_df: pd.DataFrame, clubs: pd.DataFrame) -> pd.DataFrame:
+def club_schedule(
+    path_df: pd.DataFrame,
+    clubs: pd.DataFrame,
+    club_overrides: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     progress = _company_progress(path_df)
+    override_map = {}
+    if club_overrides is not None and not club_overrides.empty:
+        tmp = club_overrides.copy()
+        tmp["Month"] = pd.to_datetime(tmp["Month"])
+        override_map = {
+            (pd.Timestamp(r["Month"]), r["Market"]): float(r["Planned Clubs"])
+            for _, r in tmp.iterrows()
+            if pd.notna(r.get("Planned Clubs"))
+        }
+
     rows = []
     for _, c in clubs.iterrows():
         for dt in path_df["Month"]:
             dt = pd.Timestamp(dt)
             p = 1.0 if dt >= pd.Timestamp("2027-08-01") else progress[dt]
-            active = float(c["Current Clubs"]) + p * (float(c["Exit Clubs"]) - float(c["Current Clubs"]))
+            calculated = float(c["Current Clubs"]) + p * (float(c["Exit Clubs"]) - float(c["Current Clubs"]))
+            active = override_map.get((dt, c["Market"]), calculated)
             rows.append({
                 "Month": dt,
                 "Market": c["Market"],
@@ -189,6 +204,7 @@ def market_funnel_plan(
     channels: pd.DataFrame,
     clubs: pd.DataFrame,
     path_df: pd.DataFrame,
+    club_overrides: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build required funnel backwards from revenue, using clubs as a capacity-driven channel."""
     market_map = markets.set_index("Market")
@@ -198,7 +214,7 @@ def market_funnel_plan(
     nonclub["Norm Mix"] = nonclub["Non-Club Lead Mix"] / nonclub["Non-Club Lead Mix"].sum()
     nonclub_yield = (nonclub["Norm Mix"] * nonclub["Lead → Appt %"] * nonclub["Appt → Sale %"]).sum()
 
-    club_df = club_schedule(path_df, clubs)
+    club_df = club_schedule(path_df, clubs, club_overrides)
     rows, market_rows = [], []
 
     for _, mr in market_revenue.iterrows():
@@ -311,10 +327,13 @@ def build_model(
     selling_days_week: float = 5.0,
     utilization: float = 0.85,
     custom_path: pd.DataFrame | None = None,
+    club_overrides: pd.DataFrame | None = None,
 ) -> dict:
     path = custom_path.copy() if custom_path is not None else company_path(target_annual, start_monthly, growth_shape)
     market_rev = allocate_market_revenue(path, markets, seasonality)
-    channel_plan, market_funnel = market_funnel_plan(market_rev, markets, channels, clubs, path)
+    channel_plan, market_funnel = market_funnel_plan(
+        market_rev, markets, channels, clubs, path, club_overrides
+    )
     hc = headcount_plan(
         market_funnel, markets, hiring_lead_time,
         appts_per_rep_day, selling_days_week, utilization,
@@ -352,7 +371,7 @@ def build_model(
         "headcount_plan": hc,
         "monthly": monthly,
         "recruiting_plan": recruiting,
-        "club_schedule": club_schedule(path, clubs),
+        "club_schedule": club_schedule(path, clubs, club_overrides),
     }
 
 
@@ -368,6 +387,7 @@ def scenario_comparison(
     appts_per_rep_day: float,
     selling_days_week: float,
     utilization: float,
+    club_overrides: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     scenarios = [
         ("Conservative", 0.90, 0.90),
@@ -384,6 +404,7 @@ def scenario_comparison(
         res = build_model(
             target_annual, start_monthly, growth_shape, m, c, clubs, seasonality,
             hiring_lead_time, appts_per_rep_day, selling_days_week, utilization,
+            club_overrides=club_overrides,
         )
         aug = res["monthly"][res["monthly"]["Month"] == pd.Timestamp("2027-08-01")].iloc[0]
         rows.append({
