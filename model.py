@@ -1,30 +1,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable
 import math
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 
 MONTHS = pd.date_range("2026-09-01", "2027-09-01", freq="MS")
-
-DEFAULT_COMPANY_PATH = {
-    "Sep-26": 4_000_000,
-    "Oct-26": 4_100_000,
-    "Nov-26": 4_200_000,
-    "Dec-26": 4_000_000,
-    "Jan-27": 3_800_000,
-    "Feb-27": 3_900_000,
-    "Mar-27": 4_200_000,
-    "Apr-27": 5_000_000,
-    "May-27": 6_100_000,
-    "Jun-27": 7_400_000,
-    "Jul-27": 8_900_000,
-    "Aug-27": 125_000_000 / 12,
-    "Sep-27": 125_000_000 / 12,
-}
 
 DEFAULT_MARKETS = pd.DataFrame(
     [
@@ -48,15 +30,28 @@ DEFAULT_MARKETS = pd.DataFrame(
 
 DEFAULT_CHANNELS = pd.DataFrame(
     [
-        ["Clubs", 0.50, 0.40, 0.25],
-        ["PC, Referral, WOM", 0.70, 0.45, 0.15],
-        ["Paid Search", 0.30, 0.35, 0.20],
-        ["Paid Social", 0.20, 0.25, 0.10],
-        ["Traditional", 0.50, 0.35, 0.10],
-        ["Events", 0.30, 0.30, 0.10],
-        ["JF / Exact / Porch", 0.25, 0.30, 0.10],
+        ["Clubs", 0.50, 0.40, 0.00],
+        ["PC, Referral, WOM", 0.70, 0.45, 0.20],
+        ["Paid Search", 0.30, 0.35, 0.27],
+        ["Paid Social", 0.20, 0.25, 0.13],
+        ["Traditional", 0.50, 0.35, 0.13],
+        ["Events", 0.30, 0.30, 0.13],
+        ["JF / Exact / Porch", 0.25, 0.30, 0.14],
     ],
-    columns=["Lead Channel", "Lead → Appt %", "Appt → Sale %", "Lead Mix"],
+    columns=["Lead Channel", "Lead → Appt %", "Appt → Sale %", "Non-Club Lead Mix"],
+)
+
+# Starting defaults are deliberately editable. They are planning assumptions, not CRM actuals.
+DEFAULT_CLUBS = pd.DataFrame(
+    [
+        ["Rhode Island", 4, 6, 10.0],
+        ["Massachusetts", 16, 20, 10.0],
+        ["Michigan", 4, 8, 10.0],
+        ["Indiana", 3, 8, 10.0],
+        ["Florida", 0, 8, 10.0],
+        ["South Carolina", 0, 3, 10.0],
+    ],
+    columns=["Market", "Current Clubs", "Exit Clubs", "Leads / Club / Week"],
 )
 
 DEFAULT_SEASONALITY = pd.DataFrame(
@@ -72,166 +67,235 @@ DEFAULT_SEASONALITY = pd.DataFrame(
 
 def company_path(target_annual: float, start_monthly: float, shape: str = "Q2 acceleration") -> pd.DataFrame:
     target_monthly = target_annual / 12
-    labels = [d.strftime("%b-%y") for d in MONTHS]
-
     if shape == "Linear":
         vals = np.linspace(start_monthly, target_monthly, 12).tolist() + [target_monthly]
     elif shape == "Conservative":
-        progress = [0, .01, .02, 0, -.03, -.02, .01, .08, .22, .40, .66, 1.0, 1.0]
-        delta = target_monthly - start_monthly
-        vals = [start_monthly + p * delta for p in progress]
+        progress = np.array([0, .01, .02, 0, -.03, -.02, .01, .07, .18, .34, .58, 1.0, 1.0])
+        vals = (start_monthly + progress * (target_monthly - start_monthly)).tolist()
     else:
-        # Matches the agreed operating plan: flat 2026 / winter softness / Q2 acceleration.
+        # Agreed pacing: restrained through 2026/Q1, majority of growth from Q2 2027.
         base_target = 125_000_000 / 12
         agreed = np.array([
             4_000_000, 4_100_000, 4_200_000, 4_000_000, 3_800_000, 3_900_000,
             4_200_000, 5_000_000, 6_100_000, 7_400_000, 8_900_000, base_target, base_target
         ], dtype=float)
-        # Scale the agreed profile around the selected starting and ending values.
-        denom = base_target - 4_000_000
-        progress = (agreed - 4_000_000) / denom
-        vals = [start_monthly + p * (target_monthly - start_monthly) for p in progress]
+        progress = (agreed - 4_000_000) / (base_target - 4_000_000)
+        vals = (start_monthly + progress * (target_monthly - start_monthly)).tolist()
 
     return pd.DataFrame({"Month": MONTHS, "Revenue Target": vals})
 
 
-def validate_inputs(markets: pd.DataFrame, channels: pd.DataFrame) -> list[str]:
+def validate_inputs(markets: pd.DataFrame, channels: pd.DataFrame, clubs: pd.DataFrame) -> list[str]:
     errors = []
-    if markets["Exit Annual Revenue"].sum() <= 0:
-        errors.append("Market exit revenue must be greater than zero.")
+    required_market_cols = {
+        "Market","Region","Average Ticket","Existing HC","Annual Revenue / Rep",
+        "Exit Annual Revenue","Starting Monthly Revenue"
+    }
+    if not required_market_cols.issubset(markets.columns):
+        errors.append("Market table is missing one or more required columns.")
+        return errors
+
     if (markets["Average Ticket"] <= 0).any():
         errors.append("Average ticket must be greater than zero.")
     if (markets["Annual Revenue / Rep"] <= 0).any():
         errors.append("Revenue per rep must be greater than zero.")
-    if channels["Lead Mix"].sum() <= 0:
-        errors.append("Lead mix must sum to a positive number.")
-    if (channels["Lead → Appt %"] <= 0).any() or (channels["Appt → Sale %"] <= 0).any():
+    if (markets["Existing HC"] < 0).any():
+        errors.append("Existing headcount cannot be negative.")
+    if channels["Lead → Appt %"].le(0).any() or channels["Appt → Sale %"].le(0).any():
         errors.append("Channel conversion rates must be greater than zero.")
+    nonclub = channels[channels["Lead Channel"] != "Clubs"]
+    if nonclub["Non-Club Lead Mix"].sum() <= 0:
+        errors.append("Non-club lead mix must sum to a positive number.")
+    if (clubs[["Current Clubs","Exit Clubs","Leads / Club / Week"]] < 0).any().any():
+        errors.append("Club assumptions cannot be negative.")
+    missing = set(markets["Market"]) - set(clubs["Market"])
+    if missing:
+        errors.append("Club assumptions are missing for: " + ", ".join(sorted(missing)))
     return errors
 
 
-def allocate_market_revenue(
-    path_df: pd.DataFrame,
-    markets: pd.DataFrame,
-    seasonality: pd.DataFrame,
-) -> pd.DataFrame:
-    """Allocate the company monthly plan to markets while respecting exit targets and seasonality."""
+def allocate_market_revenue(path_df: pd.DataFrame, markets: pd.DataFrame, seasonality: pd.DataFrame) -> pd.DataFrame:
     markets = markets.copy()
     exit_monthly = markets.set_index("Market")["Exit Annual Revenue"] / 12
     start_monthly = markets.set_index("Market")["Starting Monthly Revenue"]
 
-    # Use company-plan progress as the main growth driver.
     company_start = float(path_df.iloc[0]["Revenue Target"])
-    company_exit = float(path_df.iloc[-2]["Revenue Target"])  # Aug-27
+    company_exit = float(path_df[path_df["Month"] == pd.Timestamp("2027-08-01")].iloc[0]["Revenue Target"])
     denom = company_exit - company_start if abs(company_exit - company_start) > 1 else 1
-
     seas = seasonality.set_index("Month")
+
     rows = []
-    for i, prow in path_df.iterrows():
+    for _, prow in path_df.iterrows():
         dt = pd.Timestamp(prow["Month"])
         target = float(prow["Revenue Target"])
         progress = max(-0.25, min(1.25, (target - company_start) / denom))
         month_key = dt.strftime("%b")
-
         raw = {}
+
         for _, m in markets.iterrows():
-            market = m["Market"]
-            region = m["Region"]
+            market, region = m["Market"], m["Region"]
             base = float(start_monthly[market])
             exitv = float(exit_monthly[market])
             trend = base + progress * (exitv - base)
 
-            if month_key in seas.index:
-                factor = float(seas.loc[month_key, region])
-                if market == "Florida":
-                    factor *= float(seas.loc[month_key, "Florida Overlay"])
-            else:
-                factor = 1.0
+            factor = float(seas.loc[month_key, region]) if month_key in seas.index else 1.0
+            if market == "Florida" and month_key in seas.index:
+                factor *= float(seas.loc[month_key, "Florida Overlay"])
 
-            # Exit month is a hard target; other months use the seasonal trend.
-            if dt.strftime("%b-%y") in ("Aug-27", "Sep-27"):
+            if dt in (pd.Timestamp("2027-08-01"), pd.Timestamp("2027-09-01")):
                 raw[market] = exitv
             else:
-                raw[market] = max(0, trend * factor)
+                raw[market] = max(0.0, trend * factor)
 
-        # Scale to the company monthly target so the plan reconciles exactly.
         raw_total = sum(raw.values()) or 1
         scale = target / raw_total
         for market, value in raw.items():
-            rows.append({
-                "Month": dt,
-                "Market": market,
-                "Revenue": value * scale,
-            })
+            rows.append({"Month": dt, "Market": market, "Revenue": value * scale})
 
     return pd.DataFrame(rows)
 
 
-def market_operating_plan(market_revenue: pd.DataFrame, markets: pd.DataFrame) -> pd.DataFrame:
-    m = markets.set_index("Market")
-    df = market_revenue.copy()
-    df["Average Ticket"] = df["Market"].map(m["Average Ticket"])
-    df["Annual Revenue / Rep"] = df["Market"].map(m["Annual Revenue / Rep"])
-    df["Existing HC"] = df["Market"].map(m["Existing HC"])
-    df["Sales"] = df["Revenue"] / df["Average Ticket"]
-    df["Required HC"] = np.ceil(df["Revenue"] / (df["Annual Revenue / Rep"] / 12)).astype(int)
-
-    planned = []
-    additions = []
-    for market, g in df.groupby("Market", sort=False):
-        current = int(m.loc[market, "Existing HC"])
-        prev = current
-        for _, row in g.sort_values("Month").iterrows():
-            req = int(row["Required HC"])
-            new = max(prev, req)
-            planned.append((row.name, new))
-            additions.append((row.name, max(new - prev, 0)))
-            prev = new
-    planned_map = dict(planned)
-    adds_map = dict(additions)
-    df["Planned HC"] = [planned_map[i] for i in df.index]
-    df["Monthly Adds"] = [adds_map[i] for i in df.index]
-    return df
+def _company_progress(path_df: pd.DataFrame) -> dict[pd.Timestamp, float]:
+    start = float(path_df.iloc[0]["Revenue Target"])
+    aug = float(path_df[path_df["Month"] == pd.Timestamp("2027-08-01")].iloc[0]["Revenue Target"])
+    denom = aug - start if abs(aug - start) > 1 else 1
+    return {
+        pd.Timestamp(r["Month"]): max(0.0, min(1.0, (float(r["Revenue Target"]) - start) / denom))
+        for _, r in path_df.iterrows()
+    }
 
 
-def lead_plan(monthly_market: pd.DataFrame, channels: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    monthly_sales = monthly_market.groupby("Month", as_index=False)["Sales"].sum()
-
-    ch = channels.copy()
-    mix_total = ch["Lead Mix"].sum()
-    ch["Lead Mix"] = ch["Lead Mix"] / mix_total
-    weighted_yield = (ch["Lead Mix"] * ch["Lead → Appt %"] * ch["Appt → Sale %"]).sum()
-
+def club_schedule(path_df: pd.DataFrame, clubs: pd.DataFrame) -> pd.DataFrame:
+    progress = _company_progress(path_df)
     rows = []
-    summaries = []
-    for _, mr in monthly_sales.iterrows():
-        total_sales = float(mr["Sales"])
-        total_leads = total_sales / weighted_yield
-        total_appts = 0
-        check_sales = 0
-        for _, cr in ch.iterrows():
-            leads = total_leads * cr["Lead Mix"]
-            appts = leads * cr["Lead → Appt %"]
-            sales = appts * cr["Appt → Sale %"]
-            total_appts += appts
-            check_sales += sales
+    for _, c in clubs.iterrows():
+        for dt in path_df["Month"]:
+            dt = pd.Timestamp(dt)
+            p = 1.0 if dt >= pd.Timestamp("2027-08-01") else progress[dt]
+            active = float(c["Current Clubs"]) + p * (float(c["Exit Clubs"]) - float(c["Current Clubs"]))
             rows.append({
-                "Month": mr["Month"],
-                "Lead Channel": cr["Lead Channel"],
-                "Leads": leads,
-                "Appointments": appts,
-                "Sales": sales,
-                "Lead → Appt %": cr["Lead → Appt %"],
-                "Appt → Sale %": cr["Appt → Sale %"],
-                "Lead Mix": cr["Lead Mix"],
+                "Month": dt,
+                "Market": c["Market"],
+                "Planned Clubs": active,
+                "Leads / Club / Week": float(c["Leads / Club / Week"]),
+                "Club Leads": active * float(c["Leads / Club / Week"]) * 52 / 12,
             })
-        summaries.append({
-            "Month": mr["Month"],
-            "Sales": check_sales,
-            "Appointments": total_appts,
-            "Leads": total_leads,
+    return pd.DataFrame(rows)
+
+
+def market_funnel_plan(
+    market_revenue: pd.DataFrame,
+    markets: pd.DataFrame,
+    channels: pd.DataFrame,
+    clubs: pd.DataFrame,
+    path_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build required funnel backwards from revenue, using clubs as a capacity-driven channel."""
+    market_map = markets.set_index("Market")
+    ch = channels.copy()
+    club_row = ch[ch["Lead Channel"] == "Clubs"].iloc[0]
+    nonclub = ch[ch["Lead Channel"] != "Clubs"].copy()
+    nonclub["Norm Mix"] = nonclub["Non-Club Lead Mix"] / nonclub["Non-Club Lead Mix"].sum()
+    nonclub_yield = (nonclub["Norm Mix"] * nonclub["Lead → Appt %"] * nonclub["Appt → Sale %"]).sum()
+
+    club_df = club_schedule(path_df, clubs)
+    rows, market_rows = [], []
+
+    for _, mr in market_revenue.iterrows():
+        dt, market, revenue = pd.Timestamp(mr["Month"]), mr["Market"], float(mr["Revenue"])
+        ticket = float(market_map.loc[market, "Average Ticket"])
+        sales_required = revenue / ticket
+
+        cinfo = club_df[(club_df["Month"] == dt) & (club_df["Market"] == market)].iloc[0]
+        club_leads = float(cinfo["Club Leads"])
+        club_appts = club_leads * float(club_row["Lead → Appt %"])
+        club_sales = club_appts * float(club_row["Appt → Sale %"])
+
+        remaining_sales = max(sales_required - club_sales, 0.0)
+        nonclub_leads_total = remaining_sales / nonclub_yield if nonclub_yield > 0 else 0.0
+
+        rows.append({
+            "Month": dt, "Market": market, "Lead Channel": "Clubs",
+            "Leads": club_leads, "Appointments": club_appts, "Sales": club_sales,
+            "Lead → Appt %": float(club_row["Lead → Appt %"]),
+            "Appt → Sale %": float(club_row["Appt → Sale %"]),
+            "Lead Mix": np.nan, "Planned Clubs": float(cinfo["Planned Clubs"]),
         })
-    return pd.DataFrame(rows), pd.DataFrame(summaries)
+
+        total_leads, total_appts, total_sales = club_leads, club_appts, club_sales
+        for _, cr in nonclub.iterrows():
+            leads = nonclub_leads_total * float(cr["Norm Mix"])
+            appts = leads * float(cr["Lead → Appt %"])
+            sales = appts * float(cr["Appt → Sale %"])
+            total_leads += leads
+            total_appts += appts
+            total_sales += sales
+            rows.append({
+                "Month": dt, "Market": market, "Lead Channel": cr["Lead Channel"],
+                "Leads": leads, "Appointments": appts, "Sales": sales,
+                "Lead → Appt %": float(cr["Lead → Appt %"]),
+                "Appt → Sale %": float(cr["Appt → Sale %"]),
+                "Lead Mix": float(cr["Norm Mix"]), "Planned Clubs": np.nan,
+            })
+
+        market_rows.append({
+            "Month": dt, "Market": market, "Revenue": revenue,
+            "Sales Required": sales_required,
+            "Leads": total_leads,
+            "Appointments": total_appts,
+            "Funnel Sales": total_sales,
+            "Club Sales": club_sales,
+            "Club Sales Surplus": max(club_sales - sales_required, 0.0),
+        })
+
+    return pd.DataFrame(rows), pd.DataFrame(market_rows)
+
+
+def headcount_plan(
+    market_funnel: pd.DataFrame,
+    markets: pd.DataFrame,
+    hiring_lead_time: int,
+    appts_per_rep_day: float,
+    selling_days_week: float,
+    utilization: float,
+) -> pd.DataFrame:
+    market_map = markets.set_index("Market")
+    df = market_funnel.copy()
+    df["Existing HC"] = df["Market"].map(market_map["Existing HC"]).astype(int)
+    df["Annual Revenue / Rep"] = df["Market"].map(market_map["Annual Revenue / Rep"])
+    df["Revenue HC"] = np.ceil(df["Revenue"] / (df["Annual Revenue / Rep"] / 12)).astype(int)
+
+    monthly_appt_capacity = appts_per_rep_day * selling_days_week * 52 / 12 * utilization
+    df["Appointment Capacity / Rep"] = monthly_appt_capacity
+    df["Appointment HC"] = np.ceil(df["Appointments"] / monthly_appt_capacity).astype(int)
+    df["Required HC"] = df[["Revenue HC", "Appointment HC"]].max(axis=1)
+
+    planned_map, adds_map = {}, {}
+    for market, g in df.groupby("Market", sort=False):
+        prev = int(market_map.loc[market, "Existing HC"])
+        for idx, row in g.sort_values("Month").iterrows():
+            req = int(row["Required HC"])
+            planned = max(prev, req)
+            planned_map[idx] = planned
+            adds_map[idx] = max(planned - prev, 0)
+            prev = planned
+
+    df["Planned HC"] = [planned_map[i] for i in df.index]
+    df["Productive Adds"] = [adds_map[i] for i in df.index]
+    df["Recruit By"] = [
+        (pd.Timestamp(m) - pd.DateOffset(months=hiring_lead_time)) if adds > 0 else pd.NaT
+        for m, adds in zip(df["Month"], df["Productive Adds"])
+    ]
+    df["Capacity Status"] = np.where(
+        df["Appointment HC"] > df["Revenue HC"],
+        "Lead/appointment demand exceeds revenue-productivity HC",
+        np.where(
+            df["Revenue HC"] > df["Appointment HC"] + 2,
+            "Revenue productivity requires more HC than appointment demand",
+            "Aligned",
+        ),
+    )
+    return df
 
 
 def build_model(
@@ -240,31 +304,94 @@ def build_model(
     growth_shape: str,
     markets: pd.DataFrame,
     channels: pd.DataFrame,
+    clubs: pd.DataFrame,
     seasonality: pd.DataFrame,
+    hiring_lead_time: int = 2,
+    appts_per_rep_day: float = 2.0,
+    selling_days_week: float = 5.0,
+    utilization: float = 0.85,
     custom_path: pd.DataFrame | None = None,
 ) -> dict:
     path = custom_path.copy() if custom_path is not None else company_path(target_annual, start_monthly, growth_shape)
     market_rev = allocate_market_revenue(path, markets, seasonality)
-    market_plan = market_operating_plan(market_rev, markets)
-    channel_detail, funnel = lead_plan(market_plan, channels)
+    channel_plan, market_funnel = market_funnel_plan(market_rev, markets, channels, clubs, path)
+    hc = headcount_plan(
+        market_funnel, markets, hiring_lead_time,
+        appts_per_rep_day, selling_days_week, utilization,
+    )
 
     monthly = (
-        market_plan.groupby("Month", as_index=False)
+        hc.groupby("Month", as_index=False)
         .agg(
             Revenue=("Revenue", "sum"),
-            Sales=("Sales", "sum"),
+            Sales=("Sales Required", "sum"),
+            Appointments=("Appointments", "sum"),
+            Leads=("Leads", "sum"),
+            Revenue_HC=("Revenue HC", "sum"),
+            Appointment_HC=("Appointment HC", "sum"),
             Required_HC=("Required HC", "sum"),
             Planned_HC=("Planned HC", "sum"),
-            Monthly_Adds=("Monthly Adds", "sum"),
+            Productive_Adds=("Productive Adds", "sum"),
         )
-        .merge(funnel[["Month", "Appointments", "Leads"]], on="Month", how="left")
     )
     monthly["Annualized Run Rate"] = monthly["Revenue"] * 12
     monthly["Revenue / Planned Rep"] = monthly["Revenue"] * 12 / monthly["Planned_HC"].replace(0, np.nan)
 
+    # Recruiting plan is grouped by the month recruiting/onboarding must begin.
+    recruiting = (
+        hc.dropna(subset=["Recruit By"])
+        .groupby(["Recruit By", "Market"], as_index=False)["Productive Adds"].sum()
+        .rename(columns={"Productive Adds": "Reps to Recruit"})
+    )
+
     return {
         "company_path": path,
-        "market_plan": market_plan,
-        "channel_plan": channel_detail,
+        "market_revenue": market_rev,
+        "channel_plan": channel_plan,
+        "market_funnel": market_funnel,
+        "headcount_plan": hc,
         "monthly": monthly,
+        "recruiting_plan": recruiting,
+        "club_schedule": club_schedule(path, clubs),
     }
+
+
+def scenario_comparison(
+    target_annual: float,
+    start_monthly: float,
+    growth_shape: str,
+    markets: pd.DataFrame,
+    channels: pd.DataFrame,
+    clubs: pd.DataFrame,
+    seasonality: pd.DataFrame,
+    hiring_lead_time: int,
+    appts_per_rep_day: float,
+    selling_days_week: float,
+    utilization: float,
+) -> pd.DataFrame:
+    scenarios = [
+        ("Conservative", 0.90, 0.90),
+        ("Base", 1.00, 1.00),
+        ("Upside", 1.10, 1.10),
+    ]
+    rows = []
+    for name, conv_mult, productivity_mult in scenarios:
+        c = channels.copy()
+        c["Lead → Appt %"] = (c["Lead → Appt %"] * conv_mult).clip(upper=0.95)
+        c["Appt → Sale %"] = (c["Appt → Sale %"] * conv_mult).clip(upper=0.80)
+        m = markets.copy()
+        m["Annual Revenue / Rep"] = m["Annual Revenue / Rep"] * productivity_mult
+        res = build_model(
+            target_annual, start_monthly, growth_shape, m, c, clubs, seasonality,
+            hiring_lead_time, appts_per_rep_day, selling_days_week, utilization,
+        )
+        aug = res["monthly"][res["monthly"]["Month"] == pd.Timestamp("2027-08-01")].iloc[0]
+        rows.append({
+            "Scenario": name,
+            "Annualized Run Rate": aug["Annualized Run Rate"],
+            "Monthly Leads": aug["Leads"],
+            "Monthly Appointments": aug["Appointments"],
+            "Planned HC": aug["Planned_HC"],
+            "Incremental HC": aug["Planned_HC"] - markets["Existing HC"].sum(),
+        })
+    return pd.DataFrame(rows)

@@ -1,71 +1,98 @@
 
-# Stronghouse Growth Model
+# Stronghouse Growth Model — Web App
 
-A lightweight Streamlit app for experimenting with the operating plan to reach a Q3 2027 annual revenue run rate.
+This Streamlit app is the simplified operating model for experimenting with the path to a **$125M annual revenue run rate by Q3 2027**.
 
-## What the app models
+## Current default planning assumptions
 
-- Company monthly revenue ramp
-- Market-level annualized revenue targets
-- Seasonality by region
-- Average ticket by market
-- Existing sales headcount
-- Revenue productivity per rep
-- Lead mix by channel
-- Lead-to-appointment conversion by channel
-- Appointment-to-sale conversion by channel
-- Required leads, appointments, sales, and sales headcount
-- Monthly hiring additions
-- Side-by-side saved scenario comparison
-
-The default model reflects the latest planning assumptions:
-
-- Q3 2027 target: **$125M annualized**
 - September 2026 revenue: **$4.0M**
-- Q2 2027 growth acceleration
+- Majority of growth begins in **Q2 2027**
+- August 2027 monthly run rate: **$10.42M**
 - Rhode Island HC: **11**
 - Massachusetts HC: **3**
 - Michigan HC: **5**
 - Indiana HC: **4**
 - Florida HC: **4**
 - South Carolina HC: **2**
-- Florida target: **$36M annualized**
+- Indiana exit target: **$25M annualized**
+- Michigan exit target: **$20M annualized**
+- Florida exit target: **$36M annualized**
+- South Carolina exit target: **$5M annualized**
 - Florida productivity: **$4M revenue / rep / year**
-- Indiana target: **$25M annualized**
-- Michigan target: **$20M annualized**
-- South Carolina target: **$5M annualized**
+- Other markets: **$1.25M revenue / rep / year**
+
+## What changed in this version
+
+### Clubs are capacity-driven
+Club leads are now calculated from:
+
+`Planned Clubs × Leads per Club per Week × 52 / 12`
+
+Each market has editable:
+- Current club count
+- Exit club count
+- Leads per club per week
+
+Club leads are calculated first. The model then solves for the non-club leads needed to close the remaining sales gap.
+
+### Hiring is calendar-based
+The app distinguishes:
+- Revenue-productivity headcount
+- Appointment-capacity headcount
+- Required headcount
+- Planned headcount
+- Productive additions
+- Recruit-by month
+
+The recruit-by month is shifted earlier using the editable hiring lead-time assumption.
+
+### Capacity warnings
+The app flags markets where:
+- Appointment demand requires more reps than the revenue-productivity model, or
+- Revenue-productivity staffing is materially higher than appointment demand.
+
+### Scenario comparison
+The app automatically compares:
+- Conservative: 10% lower conversions and rep productivity
+- Base
+- Upside: 10% higher conversions and rep productivity
+
+The revenue target stays constant so the comparison shows the operational impact on leads, appointments, and headcount.
 
 ## Run locally
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
+# Windows: .venv\Scripts\activate
+
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Streamlit will open the app in your browser, normally at `http://localhost:8501`.
+Then open the local URL shown by Streamlit, normally `http://localhost:8501`.
 
-## Deploy quickly
+## Update the deployed Streamlit app
 
-### Streamlit Community Cloud
+If your app is connected to GitHub:
 
-1. Create a GitHub repository.
-2. Upload `app.py`, `model.py`, and `requirements.txt`.
-3. In Streamlit Community Cloud, create a new app from the repository.
-4. Set the app entrypoint to `app.py`.
-5. Deploy.
+1. Replace `app.py`, `model.py`, `README.md`, and `requirements.txt` in the GitHub repository with the files from this package.
+2. Commit the changes.
+3. Streamlit Community Cloud should redeploy automatically.
+4. If it does not, open the app settings and choose **Reboot app**.
 
-### Internal deployment
+The Main file path should remain:
 
-The app has no external service dependencies and can also be hosted in Docker, Azure, AWS, GCP, Render, Railway, or an internal VM.
+`app.py`
 
-## Recommended next additions
+## Files
 
-- Password / SSO authentication
-- Persisted scenarios in a database
-- CRM actual-vs-plan imports
-- Club-count modeling by market
-- Marketing spend / CPL by lead channel
-- Gross margin and EBITDA layer
-- Export scenarios back to Excel
+- `app.py` — user interface
+- `model.py` — calculation engine and default assumptions
+- `requirements.txt` — Python dependencies
+- `Dockerfile` — optional container deployment
+- `.streamlit/config.toml` — Streamlit configuration
+
+## Important planning note
+
+The club-count defaults are planning assumptions. Replace them with actual active partner locations when available. The app is designed so those inputs can be updated without changing code.
